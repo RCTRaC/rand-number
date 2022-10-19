@@ -1,0 +1,71 @@
+variables:
+    DOCKER_HOST: tcp://thedockerhost:2375
+    DOCKER_DRIVER: overlay2
+    DOCKER_TLS_CERTDIR: ""
+    IMAGE_NAME: $CI_PROJECT_NAMESPACE.$CI_PROJECT_NAME
+    FAAS_IMAGE_REGISTRY: docker-registry:5000
+    EXEC_TEST: gitlab.faas.it:5050/faas-helpers/local-faas-exec:latest
+
+default:
+  image: docker:19
+  services:
+    - name: docker:19-dind
+      alias: thedockerhost
+      entrypoint: ["dockerd-entrypoint.sh"]
+      command: ["--insecure-registry", "docker-registry:5000"]
+  before_script:
+      - export TS=$(date +"%Y%m%d-%H%M%S")
+      - docker info
+      - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+      - apk add --update curl && rm -rf /var/cache/apk/*
+      - curl https://gitlab.faas.it/faas-helpers/faas-ci-config/-/raw/main/python/Dockerfile -o Dockerfile
+
+stages:
+    - build
+    - alternative-build
+    - test
+    - deploy
+
+build-image-slim:
+    stage: build
+    script:
+        - docker build -t $CI_REGISTRY/$CI_PROJECT_NAMESPACE/$CI_PROJECT_NAME/image:latest --no-cache $CI_PROJECT_DIR --build-arg image=python:3.9-slim
+        - docker image push $CI_REGISTRY/$CI_PROJECT_NAMESPACE/$CI_PROJECT_NAME/image:latest
+
+build-image-fat:
+    stage: alternative-build
+    script:
+        - docker build -t $CI_REGISTRY/$CI_PROJECT_NAMESPACE/$CI_PROJECT_NAME/image:latest --no-cache $CI_PROJECT_DIR --build-arg image=python:3.9
+        - docker image push $CI_REGISTRY/$CI_PROJECT_NAMESPACE/$CI_PROJECT_NAME/image:latest
+    when: on_failure
+
+test-image:
+    stage: test
+    script:
+        - docker pull $CI_REGISTRY/$CI_PROJECT_NAMESPACE/$CI_PROJECT_NAME/image:latest
+        - docker image tag $CI_REGISTRY/$CI_PROJECT_NAMESPACE/$CI_PROJECT_NAME/image:latest myfaas
+        - >
+            docker run
+            -d 
+            --rm 
+            -e API_PORT=:8080 
+            -e LOG_WRITE_MODE=console 
+            -e CURRENT_FAAS_PATH=$(pwd) 
+            -v /var/run/docker.sock:/var/run/docker.sock 
+            -p 8080:8080 
+            --name local-faas-exec $EXEC_TEST
+        - sleep 10
+        - curl thedockerhost:8080/api/exec/myfaas/latest
+        - sleep 2
+        - curl thedockerhost:8080/api/exec/myfaas/latest
+    when: always
+
+deploy-faas:
+    stage: deploy
+    needs: [test-image]
+    script:
+        - docker pull $CI_REGISTRY/$CI_PROJECT_NAMESPACE/$CI_PROJECT_NAME/image:latest
+        - docker image tag $CI_REGISTRY/$CI_PROJECT_NAMESPACE/$CI_PROJECT_NAME/image:latest $FAAS_IMAGE_REGISTRY/$IMAGE_NAME:$TS
+        - docker image tag $CI_REGISTRY/$CI_PROJECT_NAMESPACE/$CI_PROJECT_NAME/image:latest $FAAS_IMAGE_REGISTRY/$IMAGE_NAME:latest
+        - docker image push $FAAS_IMAGE_REGISTRY/$IMAGE_NAME:$TS
+        - docker image push $FAAS_IMAGE_REGISTRY/$IMAGE_NAME:latest
