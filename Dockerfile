@@ -1,4 +1,5 @@
-FROM python:3.9
+ARG image
+FROM $image
 COPY . /app
 WORKDIR /app
 RUN touch requirements.txt && pip install -r requirements.txt
